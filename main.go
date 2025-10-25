@@ -58,12 +58,17 @@ func main() {
 		panic(err)
 	}
 
+	messageCache := ttlcache.New[string, string](
+		ttlcache.WithTTL[string, string](12 * time.Hour),
+	)
+	go messageCache.Start()
+
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		slog.Info("bot is online")
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {
-		slog.Info("bot is connected to server", slog.String("serverID", g.Guild.ID), slog.String("serverName", g.Guild.Name))
+		slog.Info("bot is connected to server", slog.String("server", g.Guild.ID), slog.String("server_name", g.Guild.Name))
 		registerCommands(s, g.Guild)
 		srv, err := store.ReadServer(g.Guild.ID)
 		if err != nil {
@@ -71,13 +76,36 @@ func main() {
 			return
 		}
 		if srv != nil {
-			slog.Info("starting watcher", slog.String("serverID", g.Guild.ID), slog.String("serverName", g.Guild.Name))
+			msgs, err := s.ChannelMessages(srv.ChannelId, 100, "", "", "")
+			if err != nil {
+				slog.Error("error loading message history", slog.String("server", g.Guild.ID), slog.String("channel", srv.ChannelId), "error", err)
+			}
+			for _, msg := range msgs {
+				if msg.Author.ID != s.State.User.ID {
+					continue
+				}
+				lastDate := msg.Timestamp
+				if msg.EditedTimestamp != nil {
+					lastDate = *msg.EditedTimestamp
+				}
+				if time.Since(lastDate) > 12*time.Hour {
+					continue
+				}
+
+				url := msg.Embeds[0].URL
+				idx := strings.LastIndex(url, "/")
+				reportCode := url[idx+1:]
+
+				key := srv.ServerId + srv.ChannelId + reportCode
+				messageCache.Set(key, msg.ID, ttlcache.DefaultTTL)
+			}
+			slog.Info("starting watcher", slog.String("server", g.Guild.ID))
 			w.Watch(*srv)
 		}
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, g *discordgo.GuildDelete) {
-		slog.Info("bot is disconnected from server", slog.String("serverID", g.Guild.ID))
+		slog.Info("bot is disconnected from server", slog.String("server", g.Guild.ID))
 		store.DeleteServer(g.Guild.ID)
 		w.Unwatch(g.Guild.ID)
 	})
@@ -110,9 +138,9 @@ func main() {
 				}
 				return
 			}
-			slog.Info("stopping watcher", "server", server)
+			slog.Info("stopping watcher", "server", server.ServerId)
 			w.Unwatch(server.ServerId)
-			slog.Info("starting watcher", "server", server)
+			slog.Info("starting watcher", "server", server.ServerId)
 			w.Watch(server)
 			slog.Info("bot is configured", slog.String("server", i.GuildID), slog.String("channelId", channelId), slog.Int64("wlGuildId", wlGuildId))
 			switch i.Locale {
@@ -160,11 +188,6 @@ func main() {
 			removeCommand(s, i.GuildID, data)
 		}
 	})
-
-	messageCache := ttlcache.New[string, string](
-		ttlcache.WithTTL[string, string](12 * time.Hour),
-	)
-	go messageCache.Start()
 
 	w.OnUpdate(func(se watcher.StatsEvent) {
 		key := makeKey(se)
@@ -244,7 +267,7 @@ func constructEmbed(stats watcher.StatsEvent) *discordgo.MessageEmbed {
 		color = 0x95A5A6
 	}
 	return &discordgo.MessageEmbed{
-		Title:       fmt.Sprintf("Warcraft Logs — %v", stats.Title),
+		Title:       fmt.Sprintf("Warcraft Logs\n%v", stats.Title),
 		Description: fmt.Sprintf("```Started by %v\non %v```", stats.StartedBy, stats.StartedAt.Format(time.DateTime)),
 		URL:         stats.URL,
 		Color:       color,

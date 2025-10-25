@@ -311,7 +311,7 @@ type ReportDetails struct {
 	TopFirstDeaths []PlayerTop
 }
 
-func (c *Client) TopDeathsForReport(ctx context.Context, reportCode string) (ReportDetails, error) {
+func (c *Client) TopDeathsForReport(ctx context.Context, reportCode string, wipeCutoff int64) (ReportDetails, error) {
 	fights, err := c.GetBossFights(ctx, reportCode)
 	if err != nil {
 		return ReportDetails{}, err
@@ -327,7 +327,7 @@ func (c *Client) TopDeathsForReport(ctx context.Context, reportCode string) (Rep
 		firstDeathRecorded := false
 		var firstDeathName string
 
-		err = c.streamDeathEvents(ctx, reportCode, f.ID, func(ev DeathEvent) {
+		err = c.streamDeathEvents(ctx, reportCode, f.ID, wipeCutoff, func(ev DeathEvent) {
 			totalDeaths[ev.Target.Name]++
 			if !firstDeathRecorded {
 				firstDeathName = ev.Target.Name
@@ -348,9 +348,9 @@ func (c *Client) TopDeathsForReport(ctx context.Context, reportCode string) (Rep
 	}, nil
 }
 
-func (c *Client) streamDeathEvents(ctx context.Context, reportCode string, fightId int, handle func(ev DeathEvent)) error {
+func (c *Client) streamDeathEvents(ctx context.Context, reportCode string, fightId int, wipeCutoff int64, handle func(ev DeathEvent)) error {
 	q := `
-query($code: String!, $fightId: Int!) {
+query($code: String!, $fightId: Int!, $wipeCutoff: Int!) {
   reportData {
     report(code: $code) {
       events(
@@ -361,7 +361,7 @@ query($code: String!, $fightId: Int!) {
         limit: 10000
         useAbilityIDs: true
         useActorIDs: false
-        wipeCutoff: 3
+        wipeCutoff: $wipeCutoff
       ) {
         data
         nextPageTimestamp
@@ -370,8 +370,9 @@ query($code: String!, $fightId: Int!) {
   }
 }`
 	vars := map[string]interface{}{
-		"code":    reportCode,
-		"fightId": fightId,
+		"code":       reportCode,
+		"fightId":    fightId,
+		"wipeCutoff": wipeCutoff,
 	}
 
 	var out eventsPage

@@ -72,7 +72,8 @@ type CachedReport struct {
 }
 
 func (w *Watcher) watchLoop(ctx context.Context, server storage.Server) {
-	slog.Info("starting watch loop", "server", server)
+	logger := slog.With("server", server.ServerId)
+
 	reportsCache := ttlcache.New[string, CachedReport](
 		ttlcache.WithTTL[string, CachedReport](1 * time.Hour),
 	)
@@ -83,26 +84,28 @@ func (w *Watcher) watchLoop(ctx context.Context, server storage.Server) {
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("watch loop is stopped", "server", server)
+			logger.Info("watch loop is stopped")
 			return
 		case <-after:
-			w.checkChanges(ctx, server, reportsCache)
+			w.checkChanges(ctx, logger, server, reportsCache)
 			after = time.After(1 * time.Minute)
 		}
 	}
 }
 
-func (w *Watcher) checkChanges(ctx context.Context, server storage.Server, reportsCache *ttlcache.Cache[string, CachedReport]) {
+func (w *Watcher) checkChanges(ctx context.Context, logger *slog.Logger, server storage.Server, reportsCache *ttlcache.Cache[string, CachedReport]) {
 	ctx, cancel := context.WithTimeout(ctx, 1*time.Minute)
 	defer cancel()
 
+	start := time.Now()
 	reports, err := w.wlClient.FindReports(ctx, server.WlGuildId, time.Now().Add(-12*time.Hour))
 	if err != nil {
-		slog.Error("error loading guild reports", slog.Int64("guild", server.WlGuildId), "error", err)
+		logger.Error("error loading guild reports", slog.Int64("guild", server.WlGuildId), "error", err)
 		return
 	}
 
 	reports = deleteNonRaid(reports)
+	logger.Info("loaded reports", "len", len(reports), "duration", time.Since(start).Truncate(time.Millisecond))
 
 	for _, report := range reports {
 		isOutdated := time.Since(time.UnixMilli(report.EndTime)) > 15*time.Minute
@@ -119,14 +122,16 @@ func (w *Watcher) checkChanges(ctx context.Context, server storage.Server, repor
 		case !isInCache:
 			switch {
 			case isOutdated:
-				slog.Info("old report, skipping", "report", report.Title)
+				logger.Info("old report, skipping", "report", report.Code)
 			default:
-				details, err := w.wlClient.TopDeathsForReport(ctx, report.Code)
+				start := time.Now()
+				details, err := w.wlClient.TopDeathsForReport(ctx, report.Code, server.WipeCutoff)
 				if err != nil {
-					slog.Error("error fetching report details", "report", report.Title)
+					logger.Error("error fetching report details", "report", report.Code)
 					continue
 				}
-				slog.Info("new live report, sending updates", "report", report.Title)
+				logger.Info("loaded report details", "report", report.Code, "duration", time.Since(start).Truncate(time.Millisecond))
+				logger.Info("new live report, sending updates", "report", report.Code)
 				w.sendUpdate(ctx, server, true, report, details)
 				lr := CachedReport{code: report.Code, endTime: report.EndTime, isLive: true}
 				reportsCache.Set(report.Code, lr, ttlcache.DefaultTTL)
@@ -134,27 +139,31 @@ func (w *Watcher) checkChanges(ctx context.Context, server storage.Server, repor
 		case isInCache:
 			switch {
 			case cachedReport.endTime != report.EndTime:
-				details, err := w.wlClient.TopDeathsForReport(ctx, report.Code)
+				start := time.Now()
+				details, err := w.wlClient.TopDeathsForReport(ctx, report.Code, server.WipeCutoff)
 				if err != nil {
-					slog.Error("error fetching report details", "report", report.Title)
+					logger.Error("error fetching report details", "report", report.Code)
 					continue
 				}
-				slog.Info("report has changes, sending updates", "report", report.Title)
+				logger.Info("loaded report details", "report", report.Code, "duration", time.Since(start).Truncate(time.Millisecond))
+				logger.Info("report has changes, sending updates", "report", report.Code)
 				w.sendUpdate(ctx, server, !isOutdated, report, details)
 				lr := CachedReport{code: report.Code, endTime: report.EndTime, isLive: !isOutdated}
 				reportsCache.Set(report.Code, lr, ttlcache.DefaultTTL)
 			case cachedReport.isLive && isOutdated:
-				details, err := w.wlClient.TopDeathsForReport(ctx, report.Code)
+				start := time.Now()
+				details, err := w.wlClient.TopDeathsForReport(ctx, report.Code, server.WipeCutoff)
 				if err != nil {
-					slog.Error("error fetching report details", "report", report.Title)
+					logger.Error("error fetching report details", "report", report.Code)
 					continue
 				}
-				slog.Info("report went offline, sending updates", "report", report.Title)
+				logger.Info("loaded report details", "report", report.Code, "duration", time.Since(start).Truncate(time.Millisecond))
+				logger.Info("report went offline, sending updates", "report", report.Code)
 				w.sendUpdate(ctx, server, false, report, details)
 				lr := CachedReport{code: report.Code, endTime: report.EndTime, isLive: false}
 				reportsCache.Set(report.Code, lr, ttlcache.DefaultTTL)
 			default:
-				slog.Info("report has no changes, skipping", "report", report.Title)
+				logger.Info("report has no changes, skipping", "report", report.Code)
 			}
 		}
 	}
