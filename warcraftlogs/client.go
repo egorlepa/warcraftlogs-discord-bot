@@ -262,7 +262,7 @@ type eventsPage struct {
 		Report struct {
 			Events struct {
 				Data              []json.RawMessage `json:"data"`
-				NextPageTimestamp *int64            `json:"nextPageTimestamp"`
+				NextPageTimestamp *float64          `json:"nextPageTimestamp"`
 			} `json:"events"`
 		} `json:"report"`
 	} `json:"reportData"`
@@ -320,37 +320,66 @@ func (c *Client) TopDeathsForReport(ctx context.Context, reportCode string, wipe
 		return ReportDetails{}, nil
 	}
 
-	totalDeaths := map[string]int{}
-	firstDeaths := map[string]int{}
+	var (
+		totalDeaths []PlayerTop
+		firstDeaths []PlayerTop
+
+		totalIdx = make(map[string]int) // name -> index in totalDeaths
+		firstIdx = make(map[string]int) // name -> index in firstDeaths
+	)
+
+	inc := func(list *[]PlayerTop, idx map[string]int, name string) {
+		if name == "" {
+			return
+		}
+		if i, ok := idx[name]; ok {
+			(*list)[i].Value++
+			return
+		}
+		idx[name] = len(*list)
+		*list = append(*list, PlayerTop{Name: name, Value: 1})
+	}
 
 	for _, f := range fights {
-		firstDeathRecorded := false
-		var firstDeathName string
-
-		err = c.streamDeathEvents(ctx, reportCode, f.ID, wipeCutoff, func(ev DeathEvent) {
-			totalDeaths[ev.Target.Name]++
-			if !firstDeathRecorded {
-				firstDeathName = ev.Target.Name
-				firstDeathRecorded = true
-			}
-		})
+		events, err := c.getDeathEvents(ctx, reportCode, f.ID, wipeCutoff)
 		if err != nil {
 			return ReportDetails{}, fmt.Errorf("events for fight %d: %w", f.ID, err)
 		}
-		if firstDeathRecorded && firstDeathName != "" {
-			firstDeaths[firstDeathName]++
+
+		firstTaken := false
+		for _, ev := range events {
+			name := ev.Target.Name
+			if name == "" {
+				continue
+			}
+			inc(&totalDeaths, totalIdx, name)
+			if !firstTaken {
+				inc(&firstDeaths, firstIdx, name)
+				firstTaken = true
+			}
 		}
 	}
 
+	sort.SliceStable(totalDeaths, func(i, j int) bool { return totalDeaths[i].Value > totalDeaths[j].Value })
+	sort.SliceStable(firstDeaths, func(i, j int) bool { return firstDeaths[i].Value > firstDeaths[j].Value })
+
+	const N = 5
+	if len(totalDeaths) > N {
+		totalDeaths = totalDeaths[:N]
+	}
+	if len(firstDeaths) > N {
+		firstDeaths = firstDeaths[:N]
+	}
+
 	return ReportDetails{
-		TopDeaths:      topN(totalDeaths, 5),
-		TopFirstDeaths: topN(firstDeaths, 5),
+		TopDeaths:      totalDeaths,
+		TopFirstDeaths: firstDeaths,
 	}, nil
 }
 
-func (c *Client) streamDeathEvents(ctx context.Context, reportCode string, fightId int, wipeCutoff int64, handle func(ev DeathEvent)) error {
+func (c *Client) getDeathEvents(ctx context.Context, reportCode string, fightId int, wipeCutoff int64) ([]DeathEvent, error) {
 	q := `
-query($code: String!, $fightId: Int!, $wipeCutoff: Int!) {
+query($code: String!, $fightId: Int!, $wipeCutoff: Int!, $startTime: Float) {
   reportData {
     report(code: $code) {
       events(
@@ -358,10 +387,11 @@ query($code: String!, $fightId: Int!, $wipeCutoff: Int!) {
         hostilityType: Friendlies
         killType: Encounters
         fightIDs: [$fightId]
-        limit: 10000
+        limit: 1000
         useAbilityIDs: true
         useActorIDs: false
         wipeCutoff: $wipeCutoff
+        startTime: $startTime
       ) {
         data
         nextPageTimestamp
@@ -369,42 +399,55 @@ query($code: String!, $fightId: Int!, $wipeCutoff: Int!) {
     }
   }
 }`
-	vars := map[string]interface{}{
-		"code":       reportCode,
-		"fightId":    fightId,
-		"wipeCutoff": wipeCutoff,
-	}
 
-	var out eventsPage
-	if err := c.gql(ctx, q, vars, &out); err != nil {
-		return err
-	}
-	evs := out.ReportData.Report.Events
-	for _, raw := range evs.Data {
-		var ev DeathEvent
-		_ = json.Unmarshal(raw, &ev)
-		handle(ev)
-	}
-	if evs.NextPageTimestamp == nil {
-		return nil
-	}
-	slog.Info("there were more events")
-	return nil
-}
+	var (
+		deaths        []DeathEvent
+		pageTimestamp *float64
+		pageCount     int
+		maxPages      = 10
+	)
 
-func topN(m map[string]int, n int) []PlayerTop {
-	all := make([]PlayerTop, 0, len(m))
-	for k, v := range m {
-		all = append(all, PlayerTop{Name: k, Value: v})
-	}
-	sort.Slice(all, func(i, j int) bool {
-		if all[i].Value == all[j].Value {
-			return all[i].Name < all[j].Name
+	for {
+		vars := map[string]interface{}{
+			"code":       reportCode,
+			"fightId":    fightId,
+			"wipeCutoff": wipeCutoff,
 		}
-		return all[i].Value > all[j].Value
-	})
-	if len(all) > n {
-		return all[:n]
+		if pageTimestamp != nil {
+			vars["startTime"] = *pageTimestamp
+		}
+
+		var out eventsPage
+		if err := c.gql(ctx, q, vars, &out); err != nil {
+			return nil, err
+		}
+
+		evs := out.ReportData.Report.Events
+		for _, raw := range evs.Data {
+			var ev DeathEvent
+			if err := json.Unmarshal(raw, &ev); err != nil {
+				slog.Warn("failed to unmarshal DeathEvent", "error", err)
+				continue
+			}
+			deaths = append(deaths, ev)
+		}
+
+		if evs.NextPageTimestamp == nil {
+			break
+		}
+		ts := *evs.NextPageTimestamp
+		pageTimestamp = &ts
+
+		pageCount++
+		if pageCount >= maxPages {
+			slog.Warn("pagination aborted: exceeded max pages", "maxPages", maxPages)
+			break
+		}
 	}
-	return all
+
+	sort.Slice(deaths, func(i, j int) bool {
+		return deaths[i].Timestamp < deaths[j].Timestamp
+	})
+
+	return deaths, nil
 }

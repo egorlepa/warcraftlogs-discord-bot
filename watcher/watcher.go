@@ -127,7 +127,7 @@ func (w *Watcher) checkChanges(ctx context.Context, logger *slog.Logger, server 
 				start := time.Now()
 				details, err := w.wlClient.TopDeathsForReport(ctx, report.Code, server.WipeCutoff)
 				if err != nil {
-					logger.Error("error fetching report details", "report", report.Code)
+					logger.Error("error fetching report details", "report", report.Code, "error", err)
 					continue
 				}
 				logger.Info("loaded report details", "report", report.Code, "duration", time.Since(start).Truncate(time.Millisecond))
@@ -142,7 +142,7 @@ func (w *Watcher) checkChanges(ctx context.Context, logger *slog.Logger, server 
 				start := time.Now()
 				details, err := w.wlClient.TopDeathsForReport(ctx, report.Code, server.WipeCutoff)
 				if err != nil {
-					logger.Error("error fetching report details", "report", report.Code)
+					logger.Error("error fetching report details", "report", report.Code, "error", err)
 					continue
 				}
 				logger.Info("loaded report details", "report", report.Code, "duration", time.Since(start).Truncate(time.Millisecond))
@@ -154,7 +154,7 @@ func (w *Watcher) checkChanges(ctx context.Context, logger *slog.Logger, server 
 				start := time.Now()
 				details, err := w.wlClient.TopDeathsForReport(ctx, report.Code, server.WipeCutoff)
 				if err != nil {
-					logger.Error("error fetching report details", "report", report.Code)
+					logger.Error("error fetching report details", "report", report.Code, "error", err)
 					continue
 				}
 				logger.Info("loaded report details", "report", report.Code, "duration", time.Since(start).Truncate(time.Millisecond))
