@@ -29,6 +29,7 @@ var (
 					Required: true,
 					ChannelTypes: []discordgo.ChannelType{
 						discordgo.ChannelTypeGuildText,
+						discordgo.ChannelTypeGuildNews,
 					},
 				},
 				{
